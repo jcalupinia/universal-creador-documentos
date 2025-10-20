@@ -1,7 +1,7 @@
 # Imagen base recomendada para FastAPI en Render
 FROM python:3.11-slim
 
-# Instala dependencias del sistema (para WeasyPrint y CairoSVG)
+# Instala dependencias del sistema necesarias para WeasyPrint / CairoSVG
 RUN apt-get update && apt-get install -y \
     build-essential \
     libffi-dev \
@@ -19,11 +19,11 @@ RUN apt-get update && apt-get install -y \
 WORKDIR /app
 COPY . /app
 
-# Instala dependencias de Python
-RUN pip install --no-cache-dir -r requisitos.txt
+# Instala dependencias de Python (usa el nombre correcto del archivo)
+RUN pip install --no-cache-dir -r requirements.txt
 
-# Expone el puerto usado por Render
+# Expone el puerto que Render usa
 EXPOSE 10000
 
-# Comando para iniciar la API (ajusta “main:app” si tu archivo se llama distinto)
-CMD ["uvicorn", "principal:app", "--host", "0.0.0.0", "--port", "10000"]
+# Comando para iniciar la API
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "10000"]
