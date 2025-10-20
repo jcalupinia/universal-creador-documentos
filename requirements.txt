@@ -1,14 +1,31 @@
-fastapi
-uvicorn
-pydantic
-openpyxl
-python-docx
-python-pptx
-fpdf
-pandas
-matplotlib
-scikit-learn
-numpy
-jinja2
-cairosvg
-weasyprint
+# --- Framework principal ---
+fastapi==0.115.0
+uvicorn[standard]==0.30.1
+
+# --- Modelado de datos ---
+pydantic==2.9.2
+pydantic-core==2.23.4
+
+# --- Generación de documentos ---
+openpyxl==3.1.2
+python-docx==1.1.0
+python-pptx==0.6.23
+fpdf==1.7.2
+jinja2==3.1.4
+
+# --- Datos y gráficos ---
+pandas==2.2.2
+matplotlib==3.9.0
+
+# --- PDF / SVG renderizado ---
+weasyprint==62.1
+cairosvg==2.7.1
+
+# --- ML básico (opcional, usado por /train_model y /predict_model) ---
+scikit-learn==1.5.2
+numpy==1.26.4
+
+# --- Utilidades complementarias ---
+aiofiles==24.1.0
+python-multipart==0.0.9
+requests==2.32.3
