@@ -1,18 +1,21 @@
 # Imagen base ligera y estable para FastAPI
 FROM python:3.11-slim
 
+# Evita prompts interactivos durante el build
+ENV DEBIAN_FRONTEND=noninteractive
+
 # Instala librerías del sistema necesarias para PDF, SVG y fuentes
-RUN apt-get update && apt-get install -y \
+RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     libffi-dev \
-    libpango-1.0-0 \
     libcairo2 \
     libcairo2-dev \
-    libpangoft2-1.0-0 \
-    libjpeg62-turbo-dev \
+    libpango-1.0-0 \
+    libpangocairo-1.0-0 \
+    libjpeg-dev \
+    libgdk-pixbuf2.0-0 \
     shared-mime-info \
     fonts-dejavu-core \
-    libgdk-pixbuf2.0-0 \
     libxml2 \
     libxslt1.1 \
     && apt-get clean \
