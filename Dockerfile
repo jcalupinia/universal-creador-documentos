@@ -1,37 +1,37 @@
 # Imagen base ligera y estable para FastAPI
 FROM python:3.11-slim
 
-# Evita prompts interactivos durante el build
+# Evita prompts durante instalación
 ENV DEBIAN_FRONTEND=noninteractive
 
-# Instala librerías del sistema necesarias para PDF, SVG y fuentes
+# Instala dependencias del sistema necesarias para PDF, SVG, fuentes, etc.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     libffi-dev \
     libcairo2 \
     libcairo2-dev \
-    libpango-1.0-0 \
+    libpango1.0-0 \
     libpangocairo-1.0-0 \
     libjpeg-dev \
-    libgdk-pixbuf2.0-0 \
-    shared-mime-info \
-    fonts-dejavu-core \
+    libgdk-pixbuf-2.0-0 \
     libxml2 \
     libxslt1.1 \
-    && apt-get clean \
-    && rm -rf /var/lib/apt/lists/*
+    fonts-dejavu-core \
+    shared-mime-info \
+    wget \
+    && apt-get clean && rm -rf /var/lib/apt/lists/*
 
 # Define el directorio de trabajo
 WORKDIR /app
 
-# Copia el código al contenedor
+# Copia el código fuente
 COPY . /app
 
-# Instala dependencias de Python
+# Instala dependencias Python
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Expone el puerto (Render usará su propio valor, pero este sirve como fallback)
+# Expone puerto (Render define su propio PORT)
 EXPOSE 10000
 
-# Inicia la aplicación FastAPI usando el puerto dinámico de Render
+# Ejecuta la app FastAPI con puerto dinámico
 CMD ["sh", "-c", "uvicorn main:app --host 0.0.0.0 --port ${PORT:-10000}"]
