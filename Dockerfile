@@ -12,6 +12,9 @@ RUN apt-get update && apt-get install -y \
     libjpeg62-turbo-dev \
     shared-mime-info \
     fonts-dejavu-core \
+    libgdk-pixbuf2.0-0 \
+    libxml2 \
+    libxslt1.1 \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
