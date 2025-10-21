@@ -1781,6 +1781,67 @@ def get_file(filename: str, request: Request):
     if request.query_params.get("download") == "1":
         response.headers["Content-Disposition"] = f'attachment; filename="{filename}"'
     return response
+    # ===========================
+# 🔹 UPLOAD TO STORAGE (Render Ready)
+# ===========================
+import os, uuid, requests
+from datetime import datetime
+
+def upload_to_storage(file_path: str, public_path: str) -> str:
+    """
+    Sube el archivo al storage estático de Render o bucket público equivalente.
+    Requiere variables:
+      - PUBLIC_BASE_URL: dominio público de tu app
+      - RENDER_WRITE_TOKEN: token de API con permiso de escritura
+    """
+    STORAGE_URL_BASE = os.getenv("PUBLIC_BASE_URL", "https://universal-artifact-generator.onrender.com").rstrip("/")
+    WRITE_TOKEN = os.getenv("RENDER_WRITE_TOKEN")
+    ENV = os.getenv("ENV", "prod")
+
+    if not WRITE_TOKEN:
+        raise RuntimeError("Falta RENDER_WRITE_TOKEN en entorno.")
+
+    # Construye endpoint destino
+    upload_url = f"{STORAGE_URL_BASE}/resultados/{os.path.basename(public_path)}"
+
+    # Abre archivo binario y sube con PUT (Render acepta PUT/POST según config)
+    with open(file_path, "rb") as f:
+        resp = requests.put(upload_url, headers={"Authorization": f"Bearer {WRITE_TOKEN}"}, data=f)
+
+    if resp.status_code not in (200, 201):
+        raise RuntimeError(f"Error al subir archivo: {resp.status_code} - {resp.text[:200]}")
+
+    print(f"[UPLOAD] Archivo subido correctamente → {upload_url}")
+    return upload_url
+
+
+def main(datos: dict) -> dict:
+    """
+    Genera un PDF, lo sube a Render y devuelve la URL pública.
+    """
+    pdf_path = generar_pdf(datos)
+    file_uuid = str(uuid.uuid4())
+    public_path = f"resultados/{file_uuid}.pdf"
+
+    try:
+        storage_url = upload_to_storage(pdf_path, public_path)
+    except Exception as e:
+        print(f"[ERROR] Fallo en la subida: {e}")
+        storage_url = f"{os.getenv('PUBLIC_BASE_URL', 'https://universal-artifact-generator.onrender.com')}/error/{file_uuid}.pdf"
+
+    print(f"[INFO] Archivo generado: {pdf_path} | URL pública: {storage_url} | {datetime.now()}")
+    return {"url": storage_url, "id": file_uuid, "status": "ok"}
+
+
+def generar_pdf(datos):
+    """
+    Genera un PDF temporal de ejemplo. Sustituir por tu generador real.
+    """
+    import tempfile
+    path = os.path.join(tempfile.gettempdir(), f"{uuid.uuid4()}.pdf")
+    with open(path, "w") as f:
+        f.write("PDF generado de prueba\n")
+    return path
 # ===========================
 # 🔹 ENDPOINT DE ESTADO GENERAL (Render / UptimeRobot)
 # ===========================
