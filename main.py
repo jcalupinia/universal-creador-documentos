@@ -1791,7 +1791,15 @@ def healthz():
     Render lo usa para verificar que la app esté activa.
     """
     return {"status": "ok"}
+from fastapi.responses import PlainTextResponse
 
+@app.get("/status", include_in_schema=False, response_class=PlainTextResponse)
+def status_plain():
+    return "OK"  # 200 texto plano para monitores
+
+@app.head("/status", include_in_schema=False)
+def status_head():
+    return PlainTextResponse(content="", status_code=200)
 # ===========================
 # 🔹 ENDPOINT PRINCIPAL (raíz)
 # ===========================
