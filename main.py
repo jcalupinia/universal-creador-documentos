@@ -1,9 +1,9 @@
 from fastapi import FastAPI, HTTPException
-from fastapi.responses import JSONResponse, FileResponse
+from fastapi.responses import FileResponse
 from pydantic import BaseModel
 import os
 import uuid
-import pandas as pd
+import time
 from fpdf import FPDF
 from pptx import Presentation
 from docx import Document
@@ -12,7 +12,7 @@ from openpyxl import Workbook
 # --- Inicialización ---
 app = FastAPI(
     title="Universal Artifact Generator",
-    description="API para generar documentos Excel, Word, PDF, PPT y más, con soporte para Render + UptimeRobot.",
+    description="API para generar documentos Excel, Word, PDF y PowerPoint con soporte para Render y UptimeRobot.",
     version="1.0.0"
 )
 
@@ -20,17 +20,29 @@ app = FastAPI(
 RESULTS_DIR = "resultados"
 os.makedirs(RESULTS_DIR, exist_ok=True)
 
-# --- MODELO GENERAL ---
+# --- MODELO GENERAL DE RESPUESTA ---
 class ArtifactResponse(BaseModel):
     url: str
 
 # ===========================
-# 🔹 HEALTHCHECK para Render / UptimeRobot
+# 🔹 ENDPOINT PRINCIPAL
 # ===========================
-@app.get(os.getenv("HEALTHCHECK_PATH", "/healthz"))
+@app.get("/")
+async def root():
+    """
+    Endpoint raíz de la API.
+    Muestra un mensaje de estado amigable cuando se visita la URL base.
+    """
+    return {"message": "API Universal Creador Documentos activa ✅"}
+
+# ===========================
+# 🔹 HEALTHCHECK (Render / UptimeRobot)
+# ===========================
+@app.get("/healthz")
 async def health_check():
     """
-    Endpoint de salud usado por Render y UptimeRobot para mantener el servicio activo.
+    Endpoint de salud para Render y UptimeRobot.
+    Permite mantener el servicio activo.
     """
     return {"status": "ok"}
 
@@ -69,8 +81,9 @@ async def generate_excel(payload: dict):
 async def generate_word(payload: dict):
     try:
         doc = Document()
-        doc.add_heading(payload.get("placeholders", {}).get("titulo", "Documento"), level=1)
-        doc.add_paragraph(payload.get("placeholders", {}).get("subtitulo", "Generado automáticamente"))
+        placeholders = payload.get("placeholders", {})
+        doc.add_heading(placeholders.get("titulo", "Documento generado"), level=1)
+        doc.add_paragraph(placeholders.get("subtitulo", "Archivo generado automáticamente."))
 
         file_id = str(uuid.uuid4())
         filename = f"word_{file_id}.docx"
@@ -92,8 +105,8 @@ async def generate_ppt(payload: dict):
         title = slide.shapes.title
         subtitle = slide.placeholders[1]
 
-        title.text = payload.get("title", "Presentación")
-        subtitle.text = payload.get("subtitle", "Generada automáticamente")
+        title.text = payload.get("title", "Presentación generada")
+        subtitle.text = payload.get("subtitle", "Creada automáticamente")
 
         file_id = str(uuid.uuid4())
         filename = f"ppt_{file_id}.pptx"
@@ -151,9 +164,8 @@ async def download_file(folder: str, filename: str):
 @app.on_event("startup")
 async def cleanup_results():
     """
-    Elimina archivos antiguos (>1 hora) para mantener el entorno limpio.
+    Elimina archivos antiguos (>1 hora) para mantener limpio el entorno Render.
     """
-    import time
     max_age = 60 * 60  # 1 hora
     now = time.time()
 
