@@ -1469,6 +1469,67 @@ def generate_ppt(request: Request, data: PowerPointRequest):
             return _ensure_https(f"{base}{raw}")
         return _ensure_https(raw)
 
+    def _ppt_friendly_filename(meta: Optional[Dict[str, Any]] = None, slides: Optional[List[Any]] = None) -> str:
+        meta = meta or {}
+        candidates: List[str] = []
+        def _collect(value: Any):
+            if isinstance(value, str):
+                text = value.strip()
+                if text:
+                    candidates.append(text)
+            elif isinstance(value, (list, tuple)):
+                text = " ".join(str(v).strip() for v in value if str(v).strip())
+                if text:
+                    candidates.append(text)
+        if isinstance(meta, dict):
+            opts = meta.get("options")
+            if isinstance(opts, dict):
+                _collect(opts.get("file_name") or opts.get("filename"))
+            for key in (
+                "file_name",
+                "filename",
+                "nombre_archivo",
+                "prompt",
+                "descripcion",
+                "description",
+                "title",
+                "titulo",
+                "topic",
+                "tema",
+                "subject",
+                "name",
+                "summary",
+            ):
+                _collect(meta.get(key))
+            if slides is None:
+                slides = meta.get("slides")
+        slides = slides or []
+        for slide in slides:
+            if isinstance(slide, dict):
+                for key in ("file_name", "title", "heading", "name", "tema"):
+                    if key not in slide:
+                        continue
+                    before = len(candidates)
+                    _collect(slide.get(key))
+                    if len(candidates) > before:
+                        break
+            elif isinstance(slide, str):
+                _collect(slide)
+        filtered: List[str] = []
+        seen = set()
+        for cand in candidates:
+            key = cand.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            filtered.append(cand)
+        for cand in filtered:
+            safe = re.sub(r"[^\w\-]+", "_", cand).strip("_")
+            safe = re.sub(r"_+", "_", safe)
+            if safe:
+                return f"{safe[:60]}_{uuid.uuid4().hex[:8]}.pptx"
+        return f"presentacion_{uuid.uuid4().hex[:8]}.pptx"
+    
     if advanced:
         # NO sanitizamos (para no romper hex, URLs, etc.)
         payload = data.dict()
@@ -1633,7 +1694,7 @@ def generate_ppt(request: Request, data: PowerPointRequest):
                 show_slide_number=bool(show_nums),
             )
 
-        file_id = f"{uuid.uuid4()}.pptx"
+        file_id = _ppt_friendly_filename(payload, slides_in)
         file_path = os.path.join(RESULT_DIR, file_id)
         prs.save(file_path)
         return {"url": _ppt_public_url(file_id, request)}
@@ -1737,7 +1798,7 @@ def generate_ppt(request: Request, data: PowerPointRequest):
                 show_slide_number=True,
             )
 
-    file_id = f"{uuid.uuid4()}.pptx"
+    file_id = _ppt_friendly_filename(data)
     file_path = os.path.join(RESULT_DIR, file_id)
     prs.save(file_path)
     return {"url": _ppt_public_url(file_id, request)}
