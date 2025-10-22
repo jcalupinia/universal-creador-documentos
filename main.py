@@ -1447,20 +1447,27 @@ def generate_ppt(request: Request, data: PowerPointRequest):
         or data.title or data.subtitle or data.theme or data.options or data.template_id
     )
     def _ppt_public_url(filename: str, req: Request) -> str:
+        def _ensure_https(url: str) -> str:
+            if not url:
+                return url
+            url = url.strip()
+            if url.startswith("//"):
+                url = f"https:{url}"
+            parsed = urlparse(url)
+            if not parsed.scheme:
+                return f"https://{url.lstrip('/')}"
+            if parsed.scheme == "http":
+                return f"https://{url.split('://', 1)[1]}"
+            return url
         raw = _result_url(filename, req)
         if not raw:
             return raw
         if raw.startswith("/"):
+            if req is None:
+                return _ensure_https(raw)
             base = str(req.base_url).rstrip("/")
-            if base.startswith("http://"):
-                base = "https://" + base[len("http://"):]
-            return f"{base}{raw}"
-        if "://" not in raw:
-            return f"https://{raw}"
-        parsed = urlparse(raw)
-        if not parsed.scheme:
-            return f"https://{raw}"
-        return raw
+            return _ensure_https(f"{base}{raw}")
+        return _ensure_https(raw)
 
     if advanced:
         # NO sanitizamos (para no romper hex, URLs, etc.)
