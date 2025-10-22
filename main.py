@@ -1638,48 +1638,66 @@ def generate_pdf(request: Request, data: PDFRequest):
     # ====== MODO AVANZADO (HTML+CSS con WeasyPrint) ======
     if data.sections or data.brand or data.title or data.template_id or data.options:
         if HTML is None:
-            # WeasyPrint no disponible: avisa claramente
             raise HTTPException(
                 status_code=500,
-                detail='WeasyPrint no está instalado. Agrega "weasyprint" a requirements.txt y reinstala.'
+                detail='WeasyPrint no está instalado. Agrega "weasyprint" a requirements.txt e instala.'
             )
 
-        payload = data.dict()  # NO sanitizamos para no romper data: URIs ni HTML
+        # No sanitizar para no romper data URIs, hex, etc.
+        payload = data.dict()
+
+        # --- Compatibilidad: si no hay sections, convertir 'contenido' o 'content' a párrafos ---
+        if not payload.get("sections"):
+            legacy_blocks = payload.get("contenido") or payload.get("content")
+            if isinstance(legacy_blocks, str):
+                # separa por párrafos en blanco (doble salto) o saltos largos
+                parts = [p.strip() for p in re.split(r"\n\s*\n|(?:\r?\n){2,}", legacy_blocks) if p.strip()]
+                payload["sections"] = [{"type": "p", "text": p} for p in parts]
+            elif isinstance(legacy_blocks, list):
+                payload["sections"] = [{"type": "p", "text": str(p)} for p in legacy_blocks]
+
+        # Preparar payload (logo como data URI, IDs de headings, etc.)
         pl = _prepare_pdf_payload(payload)
 
         primary = (pl.get("brand") or {}).get("primary", "#0F766E")
         opts = pl.get("options") or {}
         page_size = opts.get("page_size", "A4")
         footer_text = (opts.get("footer_text") or DEFAULT_COMPANY_NAME)
+        title = pl.get("title") or pl.get("titulo") or "Informe"
 
+        # Renderizar HTML con Jinja2
         html = Template(PDF_HTML_TMPL).render(
             page_size=page_size,
             footer_text=footer_text,
             primary=primary,
             logo_url=pl.get("logo_url"),
             company_name=pl.get("company_name"),
-            title=pl.get("title") or pl.get("titulo") or "Informe",
+            title=title,
             meta=pl.get("meta") or {},
             sections=pl.get("sections") or [],
             headings=pl.get("headings") or [],
-            toc=bool(opts.get("toc", True))  # TOC simple activado por defecto
+            toc=bool(opts.get("toc", True))  # TOC activado por defecto
         )
 
+        # Generar PDF con WeasyPrint
         pdf_bytes = HTML(string=html, base_url=".").write_pdf()
 
+        # Guardar y retornar URL pública configurable
         file_id = f"{uuid.uuid4()}.pdf"
         file_path = os.path.join(RESULT_DIR, file_id)
         with open(file_path, "wb") as f:
             f.write(pdf_bytes)
         return {"url": _pdf_url(file_id)}
 
-    # ====== MODO LEGADO (tu FPDF actual) ======
+    # ====== MODO LEGADO (FPDF) ======
     data = sanitize(data.dict())
     pdf = FPDF()
     pdf.add_page()
+
+    # Logo corporativo en portada (best-effort)
     logo_tmp = None
     try:
-        with urllib.request.urlopen(DEFAULT_LOGO_URL) as resp:
+        with urllib.request.urlopen(DEFAULT_LOGO_URL, timeout=8) as resp:
             tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".png")
             tmp.write(resp.read())
             tmp.flush()
@@ -1687,6 +1705,7 @@ def generate_pdf(request: Request, data: PDFRequest):
             logo_tmp = tmp.name
     except Exception:
         logo_tmp = None
+
     if logo_tmp:
         try:
             pdf.image(logo_tmp, x=77, y=15, w=55)
@@ -1700,19 +1719,30 @@ def generate_pdf(request: Request, data: PDFRequest):
         pdf.ln(45)
     else:
         pdf.ln(10)
+
+    # Encabezado simple
     pdf.set_text_color(0, 0, 0)
     pdf.set_font("Arial", style="B", size=16)
     pdf.cell(200, 10, txt=DEFAULT_COMPANY_NAME, ln=True, align="C")
     pdf.ln(4)
     pdf.set_font("Arial", size=12)
-    pdf.cell(200, 10, txt=data["titulo"], ln=True, align="C")
-    for line in data["contenido"]:
-        pdf.cell(200, 10, txt=line, ln=True, align='L')
+    pdf.cell(200, 10, txt=data.get("titulo") or "Informe", ln=True, align="C")
+
+    # Cuerpo (línea por línea)
+    for line in (data.get("contenido") or []):
+        pdf.cell(200, 10, txt=str(line), ln=True, align='L')
+
+    # Gráfico opcional de ejemplo
     if data.get("incluir_grafico"):
         plt.plot([1, 2, 3], [1, 4, 9])
         grafico_path = os.path.join(RESULT_DIR, "grafico.png")
         plt.savefig(grafico_path)
-        pdf.image(grafico_path, x=10, y=80, w=100)
+        try:
+            pdf.image(grafico_path, x=10, y=80, w=100)
+        except Exception:
+            pass
+
+    # Guardar y responder
     file_id = f"{uuid.uuid4()}.pdf"
     file_path = os.path.join(RESULT_DIR, file_id)
     pdf.output(file_path)
