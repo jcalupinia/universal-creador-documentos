@@ -375,7 +375,6 @@ class PDFRequest(BaseModel):
     meta: Optional[Dict[str, Any]] = None
     brand: Optional[Dict[str, Any]] = None  # {logo_url|logo_b64, primary}
     sections: Optional[List[Dict[str, Any]]] = None
-    content: Optional[List[Dict[str, Any]]] = None  # acepta contenido estilo WordRequest
     options: Optional[Dict[str, Any]] = None  # {page_size, footer_text, toc}
 
 
@@ -639,144 +638,6 @@ def _to_data_uri(img: Optional[str]) -> Optional[str]:
             return img  # WeasyPrint también puede resolver URLs si hay red
     return img
 
-def _coerce_pdf_section(entry: Any) -> List[Dict[str, Any]]:
-    """Normaliza diversos formatos de secciones hacia la estructura esperada por el PDF."""
-    if entry is None:
-        return []
-    if isinstance(entry, str):
-        return [{"type": "p", "text": entry}]
-    if not isinstance(entry, dict):
-        return [{"type": "p", "text": str(entry)}]
-    def _first_text(*keys: str) -> str:
-        for key in keys:
-            val = entry.get(key)
-            if val:
-                return str(val)
-        return ""
-    typ = str(entry.get("type") or "").lower()
-    if typ in ("h1", "heading1", "title"):
-        text = _first_text("text", "title", "value")
-        return [{"type": "h1", "text": text}] if text else []
-    if typ in ("h2", "heading2", "subtitle"):
-        text = _first_text("text", "title", "value")
-        return [{"type": "h2", "text": text}] if text else []
-    if typ == "heading":
-        level = entry.get("level", 1)
-        try:
-            level = int(level)
-        except Exception:
-            level = 1
-        text = _first_text("text", "title", "value")
-        if not text:
-            return []
-        return [{"type": "h1" if level <= 1 else "h2", "text": text}]
-    if typ in ("paragraph", "p", "text", "body", "content"):
-        text = _first_text("text", "value", "content")
-        return [{"type": "p", "text": text}] if text else []
-    if typ in ("list", "bullets", "ul", "ol"):
-        items = entry.get("items") or entry.get("values") or entry.get("rows") or []
-        if isinstance(items, str):
-            items = [items]
-        norm_items = []
-        for it in items:
-            if isinstance(it, dict):
-                norm_items.append(
-                    str(it.get("text") or it.get("value") or it.get("label") or it)
-                )
-            else:
-                norm_items.append(str(it))
-        norm_items = [i for i in norm_items if i]
-        if not norm_items:
-            return []
-        sec = {
-            "type": "ol" if (entry.get("ordered") or typ == "ol") else "ul",
-            "items": norm_items,
-        }
-        title = entry.get("title") or entry.get("text")
-        if title:
-            sec["title"] = str(title)
-        return [sec]
-    if typ == "table":
-        headers = entry.get("headers") or entry.get("columns") or []
-        rows = entry.get("rows") or entry.get("data") or []
-        headers = [str(h) for h in headers]
-        if not headers:
-            dict_rows = [r for r in rows if isinstance(r, dict)]
-            if dict_rows:
-                ordered_keys: List[str] = []
-                for row in dict_rows:
-                    for key in row.keys():
-                        if key not in ordered_keys:
-                            ordered_keys.append(str(key))
-                headers = ordered_keys
-        norm_rows = []
-        for row in rows:
-            if isinstance(row, dict) and headers:
-                norm_rows.append([str(row.get(h, "")) for h in headers])
-            elif isinstance(row, (list, tuple)):
-                norm_rows.append([str(c) for c in row])
-            else:
-                norm_rows.append([str(row)])
-        sec = {"type": "table", "headers": headers, "rows": norm_rows}
-        if entry.get("title"):
-            sec["title"] = str(entry["title"])
-        return [sec]
-    if typ in ("image", "img", "figure", "graphic"):
-        src = entry.get("src") or entry.get("url")
-        if not src:
-            b64 = entry.get("image_b64")
-            if b64:
-                b64 = str(b64)
-                src = b64 if b64.startswith("data:") else f"data:image/png;base64,{b64}"
-        if not src:
-            return []
-        sec = {"type": "img", "src": src}
-        if entry.get("caption"):
-            sec["caption"] = str(entry["caption"])
-        if entry.get("alt"):
-            sec["alt"] = str(entry["alt"])
-        if not sec.get("alt") and sec.get("caption"):
-            sec["alt"] = sec["caption"]
-        if entry.get("width"):
-            sec["width"] = entry.get("width")
-        return [sec]
-    if typ in ("blockquote", "quote"):
-        text = _first_text("text", "quote", "value")
-        if not text:
-            return []
-        sec = {"type": "blockquote", "text": text}
-        attribution = entry.get("author") or entry.get("attribution") or entry.get("source")
-        if attribution:
-            sec["attribution"] = str(attribution)
-        return [sec]
-    if typ in ("code", "pre", "codeblock"):
-        code = entry.get("code") or entry.get("text") or ""
-        if not code:
-            return []
-        sec = {"type": "code", "code": str(code)}
-        if entry.get("language"):
-            sec["language"] = str(entry["language"])
-        return [sec]
-    if typ in ("html", "raw"):
-        html = entry.get("html") or entry.get("text") or ""
-        return [{"type": "html", "html": str(html)}] if html else []
-    if "title" in entry and not entry.get("type"):
-        text = _first_text("title")
-        return [{"type": "h1", "text": text}] if text else []
-    if "text" in entry:
-        text = _first_text("text")
-        return [{"type": "p", "text": text}] if text else []
-    return [{"type": "p", "text": str(entry)}]
-def _normalize_pdf_sections(payload: Dict[str, Any]) -> List[Dict[str, Any]]:
-    """Devuelve la lista de secciones normalizada usando 'sections' o 'content'."""
-    raw_sections = payload.get("sections")
-    if not raw_sections:
-        raw_sections = payload.get("content")
-    normalized: List[Dict[str, Any]] = []
-    for entry in raw_sections or []:
-        normalized.extend(_coerce_pdf_section(entry))
-    return normalized
-    
 def _prepare_pdf_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
     """Normaliza brand/logo y secciones (ids para TOC y data URIs)."""
     pl = dict(payload)
@@ -797,15 +658,13 @@ def _prepare_pdf_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
     # ids para headings + convertir imágenes a data URI
     sections = []
     hcount = 0
-    for s in _normalize_pdf_sections(pl):
+    for s in (pl.get("sections") or []):
         s = dict(s)
         if s.get("type") in ("h1", "h2"):
             hcount += 1
             s["_id"] = f"h{hcount}"
         if s.get("type") == "img" and s.get("src"):
             s["src"] = _to_data_uri(s["src"])
-        if s.get("type") == "code":
-            s["code"] = str(s.get("code", ""))
         sections.append(s)
     pl["sections"] = sections
     pl["headings"] = [s for s in sections if s.get("type") in ("h1", "h2")]
@@ -968,32 +827,8 @@ PDF_HTML_TMPL = r"""
   {% if s.type == 'h1' %}<h1 id="{{ s._id }}">{{ s.text }}</h1>{% endif %}
   {% if s.type == 'h2' %}<h2 id="{{ s._id }}">{{ s.text }}</h2>{% endif %}
   {% if s.type == 'p'  %}<p>{{ s.text }}</p>{% endif %}
-      {% if s.title %}<p><strong>{{ s.title }}</strong></p>{% endif %}
-    <ul>
-      {% for item in s.items %}<li>{{ item }}</li>{% endfor %}
-    </ul>
-  {% endif %}
-  {% if s.type == 'ol' %}
-    {% if s.title %}<p><strong>{{ s.title }}</strong></p>{% endif %}
-    <ol>
-      {% for item in s.items %}<li>{{ item }}</li>{% endfor %}
-    </ol>
-  {% endif %}
-  {% if s.type == 'blockquote' %}
-    <blockquote>
-      <div>{{ s.text }}</div>
-      {% if s.attribution %}<footer>— {{ s.attribution }}</footer>{% endif %}
-    </blockquote>
-  {% endif %}
-  {% if s.type == 'code' %}
-    <pre><code{% if s.language %} data-lang="{{ s.language }}"{% endif %}>{{ s.code | e }}</code></pre>
-  {% endif %}
-  {% if s.type == 'html' %}
-    {{ s.html | safe }}
-  {% endif %}
 
   {% if s.type == 'table' %}
-          {% if s.title %}<p><strong>{{ s.title }}</strong></p>{% endif %}
     <table>
       <thead><tr>{% for h in s.headers %}<th>{{ h }}</th>{% endfor %}</tr></thead>
       <tbody>
@@ -1004,7 +839,7 @@ PDF_HTML_TMPL = r"""
 
   {% if s.type == 'img' %}
     <figure>
-      <img src="{{ s.src }}" style="max-width:100%" {% if s.width %}width="{{ s.width }}"{% endif %} alt="{{ s.alt or s.caption or '' }}">
+      <img src="{{ s.src }}" style="max-width:100%">
       {% if s.caption %}<figcaption>{{ s.caption }}</figcaption>{% endif %}
     </figure>
   {% endif %}
@@ -1801,7 +1636,7 @@ def generate_ppt(request: Request, data: PowerPointRequest):
 @app.post("/generate_pdf")
 def generate_pdf(request: Request, data: PDFRequest):
     # ====== MODO AVANZADO (HTML+CSS con WeasyPrint) ======
-    if data.sections or data.content or data.brand or data.title or data.meta or data.template_id or data.options:
+    if data.sections or data.brand or data.title or data.template_id or data.options:
         if HTML is None:
             # WeasyPrint no disponible: avisa claramente
             raise HTTPException(
