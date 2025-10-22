@@ -189,6 +189,27 @@ def _normalize_pdf_sections(payload: dict) -> dict:
     pl["sections"] = norm
     return pl
 
+def _split_long_text(txt: str, max_len: int = 1000) -> list[str]:
+    if not isinstance(txt, str) or not txt.strip():
+        return []
+    # 1) si el texto trae párrafos ya separados
+    chunks = [t.strip() for t in txt.split("\n\n") if t.strip()]
+    if len(chunks) > 1:
+        return chunks
+    # 2) si vino todo en un solo bloque, corta por tamaño cercano a 'max_len'
+    words = txt.split()
+    out, buf = [], []
+    cur = 0
+    for w in words:
+        buf.append(w)
+        cur += len(w) + 1
+        if cur >= max_len:
+            out.append(" ".join(buf))
+            buf, cur = [], 0
+    if buf:
+        out.append(" ".join(buf))
+    return out
+
 
 def sanitize(data):
     if isinstance(data, dict):
@@ -688,6 +709,35 @@ def _prepare_pdf_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
         if s.get("type") == "img" and s.get("src"):
             s["src"] = _to_data_uri(s["src"])
         sections.append(s)
+    sections = []
+    hcount = 0
+    for s in (pl.get("sections") or []):
+        s = dict(s)
+        t = (s.get("type") or "").lower()
+        if t in ("h1","h2"):
+            hcount += 1
+            s["_id"] = f"h{hcount}"
+            sections.append(s)
+            continue
+        if t == "p":
+            text = s.get("text") or ""
+            parts = _split_long_text(text, max_len=1000)
+            if parts:
+                for ptxt in parts:
+                    sections.append({"type": "p", "text": ptxt})
+            else:
+                sections.append(s)
+            continue
+        if t == "img" and s.get("src"):
+            s["src"] = _to_data_uri(s["src"])
+            sections.append(s)
+            continue
+        if t == "table":
+            sections.append(s)
+            continue
+        # fallback a párrafo
+        s["type"] = "p"
+        sections.append(s)
     pl["sections"] = sections
     pl["headings"] = [s for s in sections if s.get("type") in ("h1", "h2")]
     return pl
@@ -800,9 +850,21 @@ PDF_HTML_TMPL = r"""
     }
   }
   body { font-family: Inter, Arial, sans-serif; color:#111; }
+
+  /* === Títulos estilo corporativo === */
   h1, h2 { color: {{ primary }}; margin: 18px 0 8px; }
-  h1 { font-size: 22pt; }
-  h2 { font-size: 16pt; }
+  h1 {
+    font-size: 28pt;    /* sube el tamaño */
+    font-weight: 800;   /* peso fuerte */
+    letter-spacing: .2px;
+    line-height: 1.15;
+  }
+  h2 {
+    font-size: 18pt;
+    font-weight: 700;
+    line-height: 1.2;
+  }
+
   p { font-size: 11.5pt; line-height: 1.45; margin: 8px 0 10px; }
   table { width:100%; border-collapse: collapse; margin: 10px 0 14px; font-size: 11pt; }
   th, td { border:1px solid #ddd; padding: 8px; }
@@ -812,6 +874,7 @@ PDF_HTML_TMPL = r"""
   .company { font-size: 12pt; color:#333; margin-top: 6px; }
   figure { margin: 10px 0; text-align:center; }
   figcaption { font-size: 10pt; color:#666; }
+
   /* TOC */
   .toc { margin: 12px 0 24px; }
   .toc h2 { color:#666; margin: 0 0 6px; font-size: 12pt; }
@@ -820,6 +883,9 @@ PDF_HTML_TMPL = r"""
     content: target-counter(attr(href), page);
     float: right; color:#888;
   }
+
+  /* Opción: salto tras h1 (se activa con variable 'break_after_h1') */
+  {% if break_after_h1 %} h1 { page-break-after: always; } h1:first-of-type { page-break-after: avoid; } {% endif %}
 </style>
 </head>
 <body>
@@ -1666,6 +1732,7 @@ def generate_pdf(request: Request, data: PDFRequest):
                 detail='WeasyPrint no está instalado. Agrega "weasyprint" a requirements.txt y reinstala.'
             )
 
+        
         payload = data.dict()  # NO sanitizamos para no romper data: URIs ni HTML
         pl = _prepare_pdf_payload(payload)
 
@@ -1674,19 +1741,23 @@ def generate_pdf(request: Request, data: PDFRequest):
         page_size = opts.get("page_size", "A4")
         footer_text = (opts.get("footer_text") or DEFAULT_COMPANY_NAME)
 
-        html = Template(PDF_HTML_TMPL).render(
-            page_size=page_size,
-            footer_text=footer_text,
-            primary=primary,
-            logo_url=pl.get("logo_url"),
-            company_name=pl.get("company_name"),
-            title=pl.get("title") or pl.get("titulo") or "Informe",
-            meta=pl.get("meta") or {},
-            sections=pl.get("sections") or [],
-            headings=pl.get("headings") or [],
-            toc=bool(opts.get("toc", True))  # TOC simple activado por defecto
-        )
+        payload = _prepare_pdf_payload(pl)  # como ya tienes
+        opts = (payload.get("options") or {})
+        break_after_h1 = bool(opts.get("break_after_h1", False))
 
+        html = Template(PDF_HTML_TMPL).render(
+            page_size = (opts.get("page_size") or "A4"),
+            footer_text = (opts.get("footer_text") or f"© {date.today().year} {payload.get('company_name') or DEFAULT_COMPANY_NAME}"),
+            primary = (payload.get("brand") or {}).get("primary", "#0F766E"),
+            logo_url = payload.get("logo_url"),
+            company_name = payload.get("company_name") or DEFAULT_COMPANY_NAME,
+            title = payload.get("title") or payload.get("titulo") or "Informe",
+            meta = payload.get("meta") or {},
+            toc = bool(opts.get("toc", True)),
+            headings = payload.get("headings") or [],
+            sections = payload.get("sections") or [],
+            break_after_h1 = break_after_h1,
+        )
         pdf_bytes = HTML(string=html, base_url=".").write_pdf()
 
         file_id = f"{uuid.uuid4()}.pdf"
