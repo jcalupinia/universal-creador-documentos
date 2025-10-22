@@ -168,6 +168,27 @@ def _render_cover(doc, placeholders: dict, brand: dict):
     # salto de página tras portada
     doc.add_page_break()
 
+def _normalize_pdf_sections(payload: dict) -> dict:
+    pl = dict(payload)
+    norm = []
+    for s in (pl.get("sections") or []):
+        # Si viene como string simple -> parrafo
+        if isinstance(s, str):
+            norm.append({"type": "p", "text": s})
+            continue
+        s = dict(s)
+        t = (s.get("type") or "").lower()
+        # mapear 'text' -> 'p'
+        if t == "text":
+            s["type"] = "p"
+            t = "p"
+        # si el tipo no es soportado, forzar 'p'
+        if t not in {"h1","h2","p","table","img"}:
+            s["type"] = "p"
+        norm.append(s)
+    pl["sections"] = norm
+    return pl
+
 
 def sanitize(data):
     if isinstance(data, dict):
@@ -641,6 +662,7 @@ def _to_data_uri(img: Optional[str]) -> Optional[str]:
 def _prepare_pdf_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
     """Normaliza brand/logo y secciones (ids para TOC y data URIs)."""
     pl = dict(payload)
+    pl = _normalize_pdf_sections(payload)
     brand = (pl.get("brand") or {})
     # logo_url <- preferimos data URI
     logo_b64 = brand.get("logo_b64")
