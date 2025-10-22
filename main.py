@@ -1445,6 +1445,11 @@ def generate_ppt(request: Request, data: PowerPointRequest):
         (data.slides and any(isinstance(s, dict) and "type" in s for s in data.slides))
         or data.title or data.subtitle or data.theme or data.options or data.template_id
     )
+    def _ppt_public_url(filename: str, req: Request) -> str:
+        url = _result_url(filename, req)
+        if url and not url.startswith(("http://", "https://")) and not url.startswith("/"):
+            url = f"https://{url}"
+        return url
 
     if advanced:
         # NO sanitizamos (para no romper hex, URLs, etc.)
@@ -1613,7 +1618,7 @@ def generate_ppt(request: Request, data: PowerPointRequest):
         file_id = f"{uuid.uuid4()}.pptx"
         file_path = os.path.join(RESULT_DIR, file_id)
         prs.save(file_path)
-        return {"url": _result_url(file_id, request)}
+        return {"url": _ppt_public_url(file_id, request)}
 
     data = sanitize(data.dict())  # aquí sí podemos sanitizar
     apply_branding = data.get("apply_branding", True)
@@ -1717,7 +1722,7 @@ def generate_ppt(request: Request, data: PowerPointRequest):
     file_id = f"{uuid.uuid4()}.pptx"
     file_path = os.path.join(RESULT_DIR, file_id)
     prs.save(file_path)
-    return {"url": _result_url(file_id, request)}
+    return {"url": _ppt_public_url(file_id, request)}
 
 
 
