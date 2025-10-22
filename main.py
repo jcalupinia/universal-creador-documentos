@@ -15,6 +15,7 @@ import random
 import re
 import tempfile
 import urllib.request
+from urllib.parse import urlparse
 import uuid
 from datetime import date
 from typing import Any, Dict, List, Optional, Union
@@ -1446,10 +1447,20 @@ def generate_ppt(request: Request, data: PowerPointRequest):
         or data.title or data.subtitle or data.theme or data.options or data.template_id
     )
     def _ppt_public_url(filename: str, req: Request) -> str:
-        url = _result_url(filename, req)
-        if url and not url.startswith(("http://", "https://")) and not url.startswith("/"):
-            url = f"https://{url}"
-        return url
+        raw = _result_url(filename, req)
+        if not raw:
+            return raw
+        if raw.startswith("/"):
+            base = str(req.base_url).rstrip("/")
+            if base.startswith("http://"):
+                base = "https://" + base[len("http://"):]
+            return f"{base}{raw}"
+        if "://" not in raw:
+            return f"https://{raw}"
+        parsed = urlparse(raw)
+        if not parsed.scheme:
+            return f"https://{raw}"
+        return raw
 
     if advanced:
         # NO sanitizamos (para no romper hex, URLs, etc.)
