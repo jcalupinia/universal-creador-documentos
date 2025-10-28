@@ -1018,7 +1018,7 @@ def _apply_excel_header_footer(ws):
             even_footer.left = DEFAULT_COMPANY_NAME
 
 @app.post("/generate_excel")
-def generate_excel(request: Request, data: Union[ExcelRequestV2, ExcelRequest]):
+def generate_excel(request: Request, data: Union[ExcelRequestV2, ExcelRequest], name="get_file")):
     """
     Acepta:
     - v1: { "titulo": "...", "headers": [...], "rows": [...] }
