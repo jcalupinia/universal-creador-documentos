@@ -23,7 +23,7 @@ from typing import Any, Dict, List, Optional, Union
 from pathlib import PurePosixPath, Path
 from base64 import b64decode
 from typing import List, Dict, Optional, Union, Any
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError, Field
 
 # ── Third-party ────────────────────────────────────────────────────────────────
 import matplotlib.pyplot as plt
@@ -565,12 +565,19 @@ class PowerBIRequest(BaseModel):
     headers: List[str]
     rows: List[List]
 
+class ZipGenerator(BaseModel):
+    type: str
+    payload: Dict[str, Any] = Field(default_factory=dict)
+
 class ZipFileItem(BaseModel):
     path: str
     content: Optional[str] = None
     content_b64: Optional[str] = None
+    generator: Optional[ZipGenerator] = None
+    
 class ZipOptions(BaseModel):
     include_root_folder: Optional[bool] = True
+    
 class ZipRequest(BaseModel):
     project_name: Optional[str] = None
     files: List[ZipFileItem]
@@ -582,6 +589,146 @@ class TrainModelRequest(BaseModel):
 
 class PredictModelRequest(BaseModel):
     features: List[List[float]]
+
+def _local_result_path(url: str) -> str:
+    if not url:
+        raise ValueError("URL vacia")
+    parsed = urlparse(url)
+    path = parsed.path if parsed.scheme else url
+    filename = path.strip("/").split("/")[-1]
+    if not filename:
+        raise ValueError("Nombre de archivo no encontrado")
+    return os.path.join(RESULT_DIR, filename)
+
+def _read_generated_bytes(url: str) -> bytes:
+    path = _local_result_path(url)
+    with open(path, "rb") as fh:
+        return fh.read()
+
+def _generate_artifact_from_generator(item: ZipFileItem, request: Request, entry_path: str) -> bytes:
+    gen = item.generator
+    if not gen:
+        raise ValueError("Generador no especificado")
+    gtype = (gen.type or "").lower()
+    payload = gen.payload or {}
+    try:
+        if gtype in ("excel", "xlsx"):
+            try:
+                data_obj = ExcelRequestV2(**payload)
+            except ValidationError:
+                data_obj = ExcelRequest(**payload)
+            result = generate_excel(request, data_obj)
+            url = result.get("url")
+        elif gtype in ("word", "docx"):
+            data_obj = WordRequest(**payload)
+            result = generate_word(data_obj)
+            url = result.get("url")
+        elif gtype in ("ppt", "pptx", "powerpoint", "presentation"):
+            data_obj = PowerPointRequest(**payload)
+            result = generate_ppt(request, data_obj)
+            url = result.get("url")
+        elif gtype == "pdf":
+            data_obj = PDFRequest(**payload)
+            result = generate_pdf(request, data_obj)
+            url = result.get("url")
+        elif gtype in ("canva", "svg", "png"):
+            data_obj = CanvaRequest(**payload)
+            result = generate_canva(request, data_obj)
+            if entry_path.lower().endswith(".png") and result.get("url_png"):
+                url = result.get("url_png")
+            else:
+                url = result.get("url") or result.get("url_png")
+        elif gtype in ("powerbi", "csv"):
+            data_obj = PowerBIRequest(**payload)
+            result = generate_powerbi(request, data_obj)
+            url = result.get("url")
+        else:
+            raise HTTPException(status_code=400, detail=f"Generador desconocido: {gen.type}")
+    except ValidationError as exc:
+        raise HTTPException(status_code=400, detail=f"Payload invalido para {gen.type}: {exc.errors()}")
+
+    if not url:
+        raise HTTPException(status_code=500, detail=f"No se pudo generar archivo para {gen.type}")
+    return _read_generated_bytes(url)
+
+def _generate_styled_from_text(entry_path: str, content: str, request: Request) -> Optional[bytes]:
+    content = (content or "").strip()
+    if not content:
+        return None
+    ext = Path(entry_path).suffix.lower()
+    lines = [line.strip() for line in content.splitlines() if line.strip()]
+    try:
+        if ext in (".docx", ".doc"):
+            title = lines[0] if lines else "Documento Corporativo"
+            paragraphs = lines[1:] or ["Contenido pendiente"]
+            payload = {
+                "placeholders": {
+                    "titulo": title,
+                    "subtitulo": "Generado via ZIP",
+                    "autor": "Audit Consulting Group",
+                    "fecha": date.today().isoformat(),
+                },
+                "content": [{"type": "paragraph", "text": p} for p in paragraphs],
+            }
+            data_obj = WordRequest(**payload)
+            result = generate_word(data_obj)
+            return _read_generated_bytes(result.get("url"))
+        if ext in (".pptx", ".ppt"):
+            title = lines[0] if lines else "Informe Ejecutivo"
+            bullets = lines[1:] or ["Contenido pendiente"]
+            payload = {
+                "titulo": title,
+                "bullets": bullets,
+                "apply_branding": True,
+            }
+            data_obj = PowerPointRequest(**payload)
+            result = generate_ppt(request, data_obj)
+            return _read_generated_bytes(result.get("url"))
+        if ext in (".xlsx", ".xls"):
+            title = lines[0] if lines else "Libro Automatizado"
+            rows = [[line] for line in (lines[1:] if len(lines) > 1 else lines)] or [["Contenido pendiente"]]
+            payload = {
+                "titulo": title,
+                "data": {
+                    "headers": ["Descripción"],
+                    "rows": rows,
+                },
+            }
+            data_obj = ExcelRequestV2(**payload)
+            result = generate_excel(request, data_obj)
+            return _read_generated_bytes(result.get("url"))
+        if ext == ".pdf":
+            title = lines[0] if lines else "Informe Ejecutivo"
+            body = lines[1:] or ["Contenido pendiente"]
+            sections = [{"type": "h1", "text": title}] + [{"type": "p", "text": text} for text in body]
+            payload = {
+                "title": title,
+                "sections": sections,
+            }
+            data_obj = PDFRequest(**payload)
+            result = generate_pdf(request, data_obj)
+            return _read_generated_bytes(result.get("url"))
+        if ext in (".svg", ".png"):
+            title = lines[0] if lines else "Panel KPI"
+            items = lines[1:] or ["Contenido pendiente"]
+            payload = {
+                "title": title,
+                "items": items,
+                "to_png": ext == ".png",
+            }
+            data_obj = CanvaRequest(**payload)
+            result = generate_canva(request, data_obj)
+            target = result.get("url_png") if ext == ".png" and result.get("url_png") else result.get("url")
+            if target:
+                return _read_generated_bytes(target)
+        if ext == ".csv":
+            header = ["Descripción"]
+            rows = lines or ["Contenido pendiente"]
+            csv_text = ",".join(header) + "\n" + "\n".join(rows)
+            return csv_text.encode("utf-8")
+    except ValidationError:
+        return None
+    return None
 
 def _hex_to_rgb(hexstr: str):
     if not hexstr:
@@ -1969,9 +2116,15 @@ def generate_zip(request: Request, data: ZipRequest):
                     content_bytes = b64decode(b64_data)
                 except Exception:
                     raise HTTPException(status_code=400, detail=f"Contenido base64 invalido en {item.path}")
+            elif item.generator:
+                content_bytes = _generate_artifact_from_generator(item, request, entry_path)
             elif item.content is not None:
                  try:
-                    content_bytes = _generate_bytes_from_text(entry_path, item.content)
+                     styled = _generate_styled_from_text(entry_path, item.content, request)
+                     if styled is not None:
+                        content_bytes = styled
+                     else:
+                        content_bytes = _generate_bytes_from_text(entry_path, item.content)
                  except Exception:
                     raise HTTPException(status_code=500, detail=f"No se pudo generar contenido para {item.path}")     
         entries.append((entry_path, content_bytes, is_dir))
