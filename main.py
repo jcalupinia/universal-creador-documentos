@@ -16,9 +16,11 @@ import re
 import tempfile
 import urllib.request
 from urllib.parse import urlparse
+import zipfile
 import uuid
 from datetime import date
 from typing import Any, Dict, List, Optional, Union
+from pathlib import PurePosixPath
 from base64 import b64decode
 from typing import List, Dict, Optional, Union, Any
 from pydantic import BaseModel
@@ -261,6 +263,34 @@ def _ensure_https(url: str) -> str:
         return f"https://{netloc}{remainder}"
     return url
 
+def _slugify(text: Optional[str], default: str = "proyecto") -> str:
+    raw = (text or "").strip()
+    if not raw:
+        return default
+    slug = re.sub(r"[^\w\-]+", "-", raw)
+    slug = re.sub(r"-{2,}", "-", slug).strip("-")
+    return slug or default
+def _zip_safe_path(path: str) -> str:
+    if not path:
+        raise ValueError("Ruta vacia")
+    rel = path.replace("\\", "/").strip()
+    is_dir = rel.endswith("/")
+    rel = rel.lstrip("/")
+    if not rel:
+        raise ValueError("Ruta invalida")
+    if ":" in rel:
+        raise ValueError("Ruta invalida")
+    target = PurePosixPath(rel)
+    parts: List[str] = []
+    for part in target.parts:
+        if part in ("", ".", ".."):
+            raise ValueError("Ruta invalida")
+        parts.append(part)
+    clean = "/".join(parts)
+    if is_dir and not clean.endswith("/"):
+        clean += "/"
+    return clean
+
 def _result_url(filename: str, request: Optional[Request] = None) -> str:
     if PUBLIC_BASE_URL:
         return _ensure_https(f"{PUBLIC_BASE_URL}/resultados/{filename}")
@@ -465,6 +495,17 @@ class CanvaRequest(BaseModel):
 class PowerBIRequest(BaseModel):
     headers: List[str]
     rows: List[List]
+
+class ZipFileItem(BaseModel):
+    path: str
+    content: Optional[str] = None
+    content_b64: Optional[str] = None
+class ZipOptions(BaseModel):
+    include_root_folder: Optional[bool] = True
+class ZipRequest(BaseModel):
+    project_name: Optional[str] = None
+    files: List[ZipFileItem]
+    options: Optional[ZipOptions] = None
 
 class TrainModelRequest(BaseModel):
     features: List[List[float]]
@@ -1831,7 +1872,61 @@ def generate_ppt(request: Request, data: PowerPointRequest):
     prs.save(file_path)
     return {"url": _ppt_public_url(file_id, request)}
 
-
+@app.post("/generate_zip")
+def generate_zip(request: Request, data: ZipRequest):
+    files = list(data.files or [])
+    if not files:
+        raise HTTPException(status_code=400, detail="Se requieren archivos")
+    include_root = True
+    if data.options and data.options.include_root_folder is not None:
+        include_root = bool(data.options.include_root_folder)
+    project_label = data.project_name or "proyecto"
+    root_slug = _slugify(project_label, "proyecto")
+    root_prefix = f"{root_slug}/" if include_root else ""
+    entries: List[tuple[str, bytes, bool]] = []
+    for item in files:
+        try:
+            entry_path = _zip_safe_path(item.path)
+        except ValueError:
+            raise HTTPException(status_code=400, detail=f"Ruta invalida: {item.path}")
+        is_dir = entry_path.endswith("/")
+        content_bytes = b""
+        if not is_dir:
+            if item.content_b64:
+                b64_data = item.content_b64
+                if b64_data.startswith("data:"):
+                    b64_data = b64_data.split(",", 1)[1]
+                try:
+                    content_bytes = b64decode(b64_data)
+                except Exception:
+                    raise HTTPException(status_code=400, detail=f"Contenido base64 invalido en {item.path}")
+            elif item.content is not None:
+                content_bytes = item.content.encode("utf-8")
+        entries.append((entry_path, content_bytes, is_dir))
+    if not entries:
+        raise HTTPException(status_code=400, detail="No se encontraron archivos validos")
+    file_id = f"{root_slug}_{uuid.uuid4().hex[:8]}.zip"
+    file_path = os.path.join(RESULT_DIR, file_id)
+    try:
+        with zipfile.ZipFile(file_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+            for entry_path, content_bytes, is_dir in entries:
+                arcname = f"{root_prefix}{entry_path}" if root_prefix else entry_path
+                if is_dir:
+                    if not arcname.endswith("/"):
+                        arcname += "/"
+                    zf.writestr(arcname, b"")
+                else:
+                    zf.writestr(arcname, content_bytes)
+    except Exception:
+        if os.path.exists(file_path):
+            os.remove(file_path)
+        raise HTTPException(status_code=500, detail="Error al generar el ZIP")
+    return {
+        "url": _result_url(file_id, request),
+        "file": file_id,
+        "project": root_slug,
+        "count": len(entries),
+    }
 
 @app.post("/generate_pdf")
 def generate_pdf(request: Request, data: PDFRequest):
