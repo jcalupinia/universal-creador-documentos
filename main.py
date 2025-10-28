@@ -236,18 +236,46 @@ os.makedirs(RESULT_DIR, exist_ok=True)
 PUBLIC_BASE_URL = (os.getenv("PUBLIC_BASE_URL") or "").rstrip("/")
 PDF_BASE_URL = (os.getenv("PDF_BASE_URL") or "https://universal-creador-documentos.onrender.com").rstrip("/")
 
+def _ensure_https(url: str) -> str:
+    if not url:
+        return url
+    url = url.strip()
+    if url.startswith("https://"):
+        return url
+    if url.startswith("http://"):
+        return f"https://{url.split('://', 1)[1]}"
+    if "://" in url:
+        return url
+    if url.startswith("//"):
+        return f"https:{url}"
+    if url.startswith("/"):
+        return url
+    parsed = urlparse(f"//{url}", scheme="https")
+    netloc = parsed.netloc
+    if netloc:
+        remainder = parsed.path or ""
+        if parsed.query:
+            remainder += f"?{parsed.query}"
+        if parsed.fragment:
+            remainder += f"#{parsed.fragment}"
+        return f"https://{netloc}{remainder}"
+    return url
+
 def _result_url(filename: str, request: Optional[Request] = None) -> str:
     if PUBLIC_BASE_URL:
-        return f"{PUBLIC_BASE_URL}/resultados/{filename}"
+        return _ensure_https(f"{PUBLIC_BASE_URL}/resultados/{filename}")
     if request is not None:
         try:
-            return str(request.url_for("get_file", filename=filename))
+            generated = str(request.url_for("get_file", filename=filename))
+            return _ensure_https(generated)
         except Exception:
             pass
     return f"/resultados/{filename}"
 
 def _pdf_url(filename: str) -> str:
-    return f"{PDF_BASE_URL}/resultados/{filename}"
+    if PDF_BASE_URL:
+        return _ensure_https(f"{PDF_BASE_URL}/resultados/{filename}")
+    return _result_url(filename)
 
 DEFAULT_COMPANY_NAME = "Audit Consulting Group"
 DEFAULT_LOGO_URL = "https://i0.wp.com/auditconsulting.ec/wp-content/uploads/2023/02/Logo-color-Audit.png?fit=768%2C768&ssl=1"
