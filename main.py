@@ -20,7 +20,7 @@ import zipfile
 import uuid
 from datetime import date
 from typing import Any, Dict, List, Optional, Union
-from pathlib import PurePosixPath
+from pathlib import PurePosixPath, Path
 from base64 import b64decode
 from typing import List, Dict, Optional, Union, Any
 from pydantic import BaseModel
@@ -290,6 +290,75 @@ def _zip_safe_path(path: str) -> str:
     if is_dir and not clean.endswith("/"):
         clean += "/"
     return clean
+
+def _text_to_pdf_bytes(text: str) -> bytes:
+    pdf = FPDF()
+    pdf.set_auto_page_break(auto=True, margin=15)
+    pdf.add_page()
+    pdf.set_font("Helvetica", size=12)
+    for line in (text.splitlines() or [text] or [""]):
+        pdf.multi_cell(0, 8, line)
+    return pdf.output(dest="S").encode("latin-1", errors="ignore")
+def _text_to_docx_bytes(text: str) -> bytes:
+    doc = Document()
+    lines = text.splitlines() or [text] or [""]
+    for idx, line in enumerate(lines):
+        if idx == 0:
+            doc.add_heading(line.strip() or "Documento", level=1)
+        else:
+            doc.add_paragraph(line)
+    bio = io.BytesIO()
+    doc.save(bio)
+    bio.seek(0)
+    return bio.read()
+def _text_to_pptx_bytes(text: str) -> bytes:
+    prs = Presentation()
+    slide_layout = prs.slide_layouts[1] if len(prs.slide_layouts) > 1 else prs.slide_layouts[0]
+    slide = prs.slides.add_slide(slide_layout)
+    lines = text.splitlines() or [text] or [""]
+    title = slide.shapes.title
+    if title:
+        title.text = lines[0][:120] if lines[0] else "Presentacion"
+    if len(slide.placeholders) > 1:
+        body = slide.placeholders[1].text_frame
+        body.clear()
+        for idx, line in enumerate(lines[1:] or [""]):
+            p = body.add_paragraph()
+            p.text = line or ""
+            if idx == 0:
+                p.level = 0
+    bio = io.BytesIO()
+    prs.save(bio)
+    bio.seek(0)
+    return bio.read()
+def _text_to_xlsx_bytes(text: str) -> bytes:
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Sheet1"
+    lines = text.splitlines() or [text] or [""]
+    for line in lines:
+        if "," in line:
+            ws.append([c.strip() for c in line.split(",")])
+        else:
+            ws.append([line])
+    bio = io.BytesIO()
+    wb.save(bio)
+    bio.seek(0)
+    return bio.read()
+def _generate_bytes_from_text(path: str, content: str) -> bytes:
+    ext = Path(path).suffix.lower()
+    if ext == ".pdf":
+        return _text_to_pdf_bytes(content)
+    if ext in (".docx", ".doc"):
+        return _text_to_docx_bytes(content)
+    if ext in (".pptx", ".ppt"):
+        return _text_to_pptx_bytes(content)
+    if ext in (".xlsx", ".xls"):
+        return _text_to_xlsx_bytes(content)
+    if ext in (".csv",):
+        return ("\n".join(line if isinstance(line, str) else str(line) for line in (content.splitlines() or [content]))).encode("utf-8")
+    return content.encode("utf-8")
+
 
 def _result_url(filename: str, request: Optional[Request] = None) -> str:
     if PUBLIC_BASE_URL:
@@ -1901,8 +1970,12 @@ def generate_zip(request: Request, data: ZipRequest):
                 except Exception:
                     raise HTTPException(status_code=400, detail=f"Contenido base64 invalido en {item.path}")
             elif item.content is not None:
-                content_bytes = item.content.encode("utf-8")
+                 try:
+                    content_bytes = _generate_bytes_from_text(entry_path, item.content)
+                 except Exception:
+                    raise HTTPException(status_code=500, detail=f"No se pudo generar contenido para {item.path}")     
         entries.append((entry_path, content_bytes, is_dir))
+        
     if not entries:
         raise HTTPException(status_code=400, detail="No se encontraron archivos validos")
     file_id = f"{root_slug}_{uuid.uuid4().hex[:8]}.zip"
