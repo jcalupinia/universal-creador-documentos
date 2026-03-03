@@ -621,7 +621,7 @@ def _generate_artifact_from_generator(item: ZipFileItem, request: Request, entry
             url = result.get("url")
         elif gtype in ("word", "docx"):
             data_obj = WordRequest(**payload)
-            result = generate_word(data_obj)
+            result = generate_word(request, data_obj)
             url = result.get("url")
         elif gtype in ("ppt", "pptx", "powerpoint", "presentation"):
             data_obj = PowerPointRequest(**payload)
@@ -671,7 +671,7 @@ def _generate_styled_from_text(entry_path: str, content: str, request: Request) 
                 "content": [{"type": "paragraph", "text": p} for p in paragraphs],
             }
             data_obj = WordRequest(**payload)
-            result = generate_word(data_obj)
+            result = generate_word(request, data_obj)
             return _read_generated_bytes(result.get("url"))
         if ext in (".pptx", ".ppt"):
             title = lines[0] if lines else "Informe Ejecutivo"
@@ -1570,7 +1570,7 @@ def generate_excel(request: Request, data: Union[ExcelRequestV2, ExcelRequest], 
     return {"url": _result_url(file_id, request)}
 
 @app.post("/generate_word")
-def generate_word(data: WordRequest):
+def generate_word(request: Request, data: WordRequest):
     if data.content or data.placeholders or data.options or data.template_id:
         placeholders = data.placeholders or {}
         options = data.options or {}
@@ -1700,7 +1700,7 @@ def generate_word(data: WordRequest):
         file_id = f"{uuid.uuid4()}.docx"
         file_path = os.path.join(RESULT_DIR, file_id)
         doc.save(file_path)
-        return {"url": f"/resultados/{file_id}"}
+        return {"url": _result_url(file_id, request)}
 
     data = sanitize(data.dict())  # aquí sí sanitizamos como antes
     doc = Document()
@@ -1720,7 +1720,7 @@ def generate_word(data: WordRequest):
     file_id = f"{uuid.uuid4()}.docx"
     file_path = os.path.join(RESULT_DIR, file_id)
     doc.save(file_path)
-    return {"url": f"/resultados/{file_id}"}
+    return {"url": _result_url(file_id, request)}
 
 
 
