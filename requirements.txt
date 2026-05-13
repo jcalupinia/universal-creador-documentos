@@ -18,7 +18,8 @@ pandas==2.2.2
 matplotlib==3.9.0
 
 # --- PDF / SVG renderizado ---
-weasyprint==62.1
+weasyprint==66.0
+pydyf==0.11.0
 cairosvg==2.7.1
 
 # --- ML básico (opcional, usado por /train_model y /predict_model) ---
