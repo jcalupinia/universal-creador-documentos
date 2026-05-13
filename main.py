@@ -299,6 +299,73 @@ def _text_to_pdf_bytes(text: str) -> bytes:
     for line in (text.splitlines() or [text] or [""]):
         pdf.multi_cell(0, 8, line)
     return pdf.output(dest="S").encode("latin-1", errors="ignore")
+
+def _pdf_safe_text(value: Any) -> str:
+    text = _clean_document_text(value)
+    return text.encode("latin-1", errors="replace").decode("latin-1")
+
+def _fallback_pdf_bytes_from_payload(payload: Dict[str, Any]) -> bytes:
+    """Genera un PDF basico si WeasyPrint falla en Render."""
+    blocks = _normalize_document_blocks(payload.get("sections") or payload.get("content") or [])
+    if not blocks and payload.get("contenido"):
+        blocks = _normalize_document_blocks(payload.get("contenido"))
+
+    pdf = FPDF()
+    pdf.set_auto_page_break(auto=True, margin=15)
+    pdf.add_page()
+
+    title = payload.get("title") or payload.get("titulo") or "Documento"
+    meta = payload.get("meta") or {}
+
+    pdf.set_font("Arial", "B", 16)
+    pdf.multi_cell(0, 9, _pdf_safe_text(title), align="C")
+    pdf.ln(3)
+    if meta:
+        pdf.set_font("Arial", "", 10)
+        meta_text = " - ".join(_pdf_safe_text(v) for v in meta.values() if v)
+        if meta_text:
+            pdf.multi_cell(0, 6, meta_text, align="C")
+            pdf.ln(5)
+
+    headings = _document_headings(blocks)
+    if headings:
+        pdf.set_font("Arial", "B", 13)
+        pdf.cell(0, 8, "Indice de contenido", ln=True)
+        pdf.set_font("Arial", "", 11)
+        for h in headings:
+            prefix = "  " if h.get("level", 1) > 1 else ""
+            pdf.multi_cell(0, 6, _pdf_safe_text(f"{prefix}{h['text']}"))
+        pdf.add_page()
+
+    for block in blocks:
+        typ = block.get("type")
+        if typ == "heading":
+            level = min(max(int(block.get("level") or 1), 1), 3)
+            pdf.set_font("Arial", "B", 15 if level == 1 else 13)
+            pdf.multi_cell(0, 8, _pdf_safe_text(block.get("text")))
+            pdf.ln(2)
+        elif typ == "paragraph":
+            pdf.set_font("Arial", "", 11)
+            pdf.multi_cell(0, 6, _pdf_safe_text(block.get("text")))
+            pdf.ln(2)
+        elif typ == "list":
+            pdf.set_font("Arial", "", 11)
+            for item in block.get("items") or []:
+                pdf.multi_cell(0, 6, _pdf_safe_text(f"- {item}"))
+            pdf.ln(2)
+        elif typ == "table":
+            pdf.set_font("Arial", "B", 9)
+            headers = block.get("headers") or []
+            rows = block.get("rows") or []
+            if headers:
+                pdf.multi_cell(0, 6, _pdf_safe_text(" | ".join(map(str, headers))))
+            pdf.set_font("Arial", "", 9)
+            for row in rows:
+                pdf.multi_cell(0, 6, _pdf_safe_text(" | ".join(map(str, row))))
+            pdf.ln(2)
+
+    return pdf.output(dest="S").encode("latin-1", errors="ignore")
+
 def _text_to_docx_bytes(text: str) -> bytes:
     doc = Document()
     lines = text.splitlines() or [text] or [""]
@@ -1711,7 +1778,11 @@ def generate_excel(request: Request, data: Union[ExcelRequestV2, ExcelRequest], 
         rng = f"{get_column_letter(last_num_col)}{data_start_idx}:{get_column_letter(last_num_col)}{last_row}"
         ws_det.conditional_formatting.add(
             rng,
-            ColorScaleRule(start_type="min", mid_type="percentile", mid_value=50, end_type="max")
+            ColorScaleRule(
+                start_type="min", start_color="F8696B",
+                mid_type="percentile", mid_value=50, mid_color="FFEB84",
+                end_type="max", end_color="63BE7B",
+            )
         )
 
     # Validación de datos simple sobre col A (si aplica)
@@ -1770,7 +1841,10 @@ def generate_excel(request: Request, data: Union[ExcelRequestV2, ExcelRequest], 
         import pandas as pd
         df = pd.DataFrame(rows, columns=headers)
         for col in df.columns:
-            df[col] = pd.to_numeric(df[col], errors="ignore")
+            try:
+                df[col] = pd.to_numeric(df[col])
+            except (TypeError, ValueError):
+                pass
         first_col = headers[0]
         num_cols = [c for c in df.columns if pd.api.types.is_numeric_dtype(df[c])]
         if num_cols:
@@ -2475,7 +2549,7 @@ def generate_zip(request: Request, data: ZipRequest):
 def generate_pdf(request: Request, data: PDFRequest):
     # ====== MODO AVANZADO (HTML+CSS con WeasyPrint) ======
     if data.sections or data.brand or data.title or data.template_id or data.options:
-        if HTML is None:
+        if False and HTML is None:
             # WeasyPrint no disponible: avisa claramente
             raise HTTPException(
                 status_code=500,
@@ -2508,7 +2582,12 @@ def generate_pdf(request: Request, data: PDFRequest):
             sections = payload.get("sections") or [],
             break_after_h1 = break_after_h1,
         )
-        pdf_bytes = HTML(string=html, base_url=".").write_pdf()
+        try:
+            if HTML is None:
+                raise RuntimeError("WeasyPrint no disponible")
+            pdf_bytes = HTML(string=html, base_url=".").write_pdf()
+        except Exception:
+            pdf_bytes = _fallback_pdf_bytes_from_payload(payload)
 
         file_id = f"{uuid.uuid4()}.pdf"
         file_path = os.path.join(RESULT_DIR, file_id)
