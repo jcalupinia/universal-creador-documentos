@@ -74,6 +74,27 @@ try:
     import cairosvg  
 except Exception:
     cairosvg = None
+
+def _normalize_logo_image_bytes(data: bytes) -> bytes:
+    """Recorta fondo negro/transparente del logo local y devuelve PNG con transparencia."""
+    try:
+        from PIL import Image
+        img = Image.open(io.BytesIO(data)).convert("RGBA")
+        pixels = img.load()
+        w, h = img.size
+        for y in range(h):
+            for x in range(w):
+                r, g, b, a = pixels[x, y]
+                if a == 0 or (r < 18 and g < 18 and b < 18):
+                    pixels[x, y] = (255, 255, 255, 0)
+        bbox = img.getbbox()
+        if bbox:
+            img = img.crop(bbox)
+        out = io.BytesIO()
+        img.save(out, format="PNG")
+        return out.getvalue()
+    except Exception:
+        return data
     
 def clean_text(text):
     if isinstance(text, str):
@@ -104,9 +125,15 @@ def _load_logo_bytes(logo_url: Optional[str] = None, logo_b64: Optional[str] = N
     if url:
         try:
             with open(url, "rb") as fh:
-                return fh.read()
+                return _normalize_logo_image_bytes(fh.read())
         except Exception:
             return b64decode(DEFAULT_LOGO_B64)
+    if os.path.exists(DEFAULT_LOGO_PATH):
+        try:
+            with open(DEFAULT_LOGO_PATH, "rb") as fh:
+                return _normalize_logo_image_bytes(fh.read())
+        except Exception:
+            pass
     return b64decode(DEFAULT_LOGO_B64)
 
 def _logo_to_data_uri(logo_url: Optional[str] = None, logo_b64: Optional[str] = None) -> str:
@@ -115,7 +142,8 @@ def _logo_to_data_uri(logo_url: Optional[str] = None, logo_b64: Optional[str] = 
         data = _load_logo_bytes(logo_url, logo_b64)
         if not data:
             return DEFAULT_LOGO_DATA_URI
-        return f"data:image/png;base64,{base64.b64encode(data).decode('ascii')}"
+        mime = "image/png" if data.startswith(b"\x89PNG") else "image/jpeg"
+        return f"data:{mime};base64,{base64.b64encode(data).decode('ascii')}"
     except Exception:
         return DEFAULT_LOGO_DATA_URI
 
@@ -123,7 +151,8 @@ def _add_docx_image(run, image_bytes: bytes, width_in: float = 1.6):
     """Adjunta una imagen a un run de docx usando un archivo temporal."""
     if not image_bytes:
         return
-    tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".png")
+    suffix = ".jpg" if image_bytes[:3] == b"\xff\xd8\xff" else ".png"
+    tmp = tempfile.NamedTemporaryFile(delete=False, suffix=suffix)
     try:
         tmp.write(image_bytes)
         tmp.flush()
@@ -235,6 +264,7 @@ app.add_middleware(
 
 RESULT_DIR = "resultados"
 os.makedirs(RESULT_DIR, exist_ok=True)
+DEFAULT_LOGO_PATH = os.path.join("assets", "Logo-color-Audit.jpg")
 PUBLIC_BASE_URL = (os.getenv("PUBLIC_BASE_URL") or "").rstrip("/")
 PDF_BASE_URL = (os.getenv("PDF_BASE_URL") or "https://universal-creador-documentos.onrender.com").rstrip("/")
 
@@ -836,13 +866,18 @@ def _add_logo(slide, prs, brand: PPTBrand):
         stream = io.BytesIO(logo_bytes)
         stream.seek(0)
         picture = slide.shapes.add_picture(stream, 0, 0)
-        target_height = Inches(0.9)
-        scale = target_height / picture.height
-        picture.height = target_height
-        picture.width = int(picture.width * scale)
-        margin = Inches(0.4)
+        target_width = Inches(1.25)
+        try:
+            from PIL import Image
+            img = Image.open(io.BytesIO(logo_bytes))
+            ratio = img.height / img.width
+        except Exception:
+            ratio = picture.height / picture.width if picture.width else 0.35
+        picture.width = target_width
+        picture.height = int(target_width * ratio)
+        margin = Inches(0.35)
         picture.left = prs.slide_width - picture.width - margin
-        picture.top = Inches(0.3)
+        picture.top = Inches(0.18)
     except Exception:
         pass
 
@@ -955,14 +990,12 @@ def _set_header_footer(section, header_cfg: Optional[Dict[str, str]], footer_cfg
             _add_page_numbering(pr, right)
 
     # Logo (URL o base64) al encabezado, alineado a la derecha
-    logo_bytes = None
-    if logo_url or logo_b64:
-        logo_bytes = _load_logo_bytes(logo_url, logo_b64)
+    logo_bytes = _load_logo_bytes(logo_url, logo_b64)
     if logo_bytes:
         p_logo = header.add_paragraph()
         p_logo.alignment = WD_ALIGN_PARAGRAPH.RIGHT
         run_logo = p_logo.add_run()
-        _add_docx_image(run_logo, logo_bytes, width_in=1.6)
+        _add_docx_image(run_logo, logo_bytes, width_in=1.25)
 
     if watermark_text:
         pw = header.add_paragraph()
@@ -1045,11 +1078,8 @@ def _prepare_pdf_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
     brand = (pl.get("brand") or {})
     # logo_url <- preferimos data URI
     logo_b64 = brand.get("logo_b64")
-    logo_url = brand.get("logo_url") or DEFAULT_LOGO_URL
-    if logo_b64:
-        pl["logo_url"] = f"data:image/png;base64,{logo_b64}"
-    else:
-        pl["logo_url"] = _to_data_uri(logo_url)
+    logo_url = brand.get("logo_url")
+    pl["logo_url"] = _logo_to_data_uri(logo_url=logo_url, logo_b64=logo_b64)
     company_name = brand.get("company_name") or pl.get("company_name") or DEFAULT_COMPANY_NAME
     pl["company_name"] = company_name
     meta = dict(pl.get("meta") or {})
@@ -1491,8 +1521,9 @@ PDF_HTML_TMPL = r"""
   table { width:100%; border-collapse: collapse; margin: 10px 0 14px; font-size: 11pt; }
   th, td { border:1px solid #ddd; padding: 8px; }
   th { background: {{ primary }}10; text-align: left; }
+  .page-logo { position: fixed; top: -8mm; right: 0; width: 30mm; max-height: 18mm; object-fit: contain; }
   .cover { display:flex; height:85vh; align-items:center; justify-content:center; text-align:center; }
-  .logo { max-height:60px; margin-bottom: 10px; }
+  .logo { max-width:150px; max-height:85px; object-fit: contain; margin-bottom: 10px; }
   .company { font-size: 12pt; color:#333; margin-top: 6px; }
   figure { margin: 10px 0; text-align:center; }
   figcaption { font-size: 10pt; color:#666; }
@@ -1511,6 +1542,8 @@ PDF_HTML_TMPL = r"""
 </style>
 </head>
 <body>
+
+{% if logo_url %}<img class="page-logo" src="{{ logo_url }}">{% endif %}
 
 <!-- Portada -->
 <div class="cover">
@@ -1576,7 +1609,7 @@ def _brand_excel_sheet(ws, max_cols: int):
     cell.font = Font(bold=True, size=14, color="0563C1")
     cell.alignment = Alignment(horizontal="center")
     try:
-        logo_bytes = _load_logo_bytes(DEFAULT_LOGO_URL, DEFAULT_LOGO_B64)
+        logo_bytes = _load_logo_bytes()
         if logo_bytes:
             bio = io.BytesIO(logo_bytes)
             bio.seek(0)
@@ -2180,8 +2213,7 @@ def generate_ppt(request: Request, data: PowerPointRequest):
         brand_data = payload.get("brand") or {}
         brand = PPTBrand(**brand_data)
         if not (brand.logo_b64 or brand.logo_url):
-            brand.logo_b64 = DEFAULT_LOGO_B64
-            brand.logo_url = DEFAULT_LOGO_URL
+            brand.logo_url = DEFAULT_LOGO_PATH if os.path.exists(DEFAULT_LOGO_PATH) else DEFAULT_LOGO_URL
         company_name = (
             brand_data.get("company_name")
             or (payload.get("company") if isinstance(payload.get("company"), str) else None)
@@ -2378,8 +2410,7 @@ def generate_ppt(request: Request, data: PowerPointRequest):
     brand_data = data.get("brand") or {}
     brand = PPTBrand(**brand_data)
     if not (brand.logo_b64 or brand.logo_url):
-        brand.logo_b64 = DEFAULT_LOGO_B64
-        brand.logo_url = DEFAULT_LOGO_URL
+        brand.logo_url = DEFAULT_LOGO_PATH if os.path.exists(DEFAULT_LOGO_PATH) else DEFAULT_LOGO_URL
     company_name = brand_data.get("company_name") or data.get("company_name") or DEFAULT_COMPANY_NAME
 
     prs = Presentation()
@@ -2601,9 +2632,10 @@ def generate_pdf(request: Request, data: PDFRequest):
     pdf.add_page()
     logo_tmp = None
     try:
-        with urllib.request.urlopen(DEFAULT_LOGO_URL) as resp:
-            tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".png")
-            tmp.write(resp.read())
+        logo_bytes = _load_logo_bytes()
+        if logo_bytes:
+            tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".jpg")
+            tmp.write(logo_bytes)
             tmp.flush()
             tmp.close()
             logo_tmp = tmp.name
