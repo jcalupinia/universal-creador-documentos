@@ -621,7 +621,7 @@ def _generate_artifact_from_generator(item: ZipFileItem, request: Request, entry
             url = result.get("url")
         elif gtype in ("word", "docx"):
             data_obj = WordRequest(**payload)
-            result = generate_word(request, data_obj)
+            result = generate_word(data_obj)
             url = result.get("url")
         elif gtype in ("ppt", "pptx", "powerpoint", "presentation"):
             data_obj = PowerPointRequest(**payload)
@@ -671,7 +671,7 @@ def _generate_styled_from_text(entry_path: str, content: str, request: Request) 
                 "content": [{"type": "paragraph", "text": p} for p in paragraphs],
             }
             data_obj = WordRequest(**payload)
-            result = generate_word(request, data_obj)
+            result = generate_word(data_obj)
             return _read_generated_bytes(result.get("url"))
         if ext in (".pptx", ".ppt"):
             title = lines[0] if lines else "Informe Ejecutivo"
@@ -969,7 +969,12 @@ def _to_data_uri(img: Optional[str]) -> Optional[str]:
 def _prepare_pdf_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
     """Normaliza brand/logo y secciones (ids para TOC y data URIs)."""
     pl = dict(payload)
-    pl = _normalize_pdf_sections(payload)
+    if pl.get("sections"):
+        pl["sections"] = _blocks_to_pdf_sections(_normalize_document_blocks(pl.get("sections")))
+    elif pl.get("content"):
+        pl["sections"] = _blocks_to_pdf_sections(_normalize_document_blocks(pl.get("content")))
+    else:
+        pl = _normalize_pdf_sections(payload)
     brand = (pl.get("brand") or {})
     # logo_url <- preferimos data URI
     logo_b64 = brand.get("logo_b64")
@@ -1121,6 +1126,270 @@ def _coerce_json(value: Any):
             return value
     return value
 
+def _clean_document_text(value: Any) -> str:
+    text = "" if value is None else str(value)
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
+    if "\\n" in text:
+        text = text.replace("\\n", "\n")
+    return text.strip()
+
+def _looks_like_heading(text: str) -> bool:
+    clean = _clean_document_text(text)
+    if not clean or len(clean) > 140:
+        return False
+    upper = clean.upper()
+    heading_starts = (
+        "INTRODUCCION",
+        "INTRODUCCIÓN",
+        "CONCLUSION",
+        "CONCLUSIÓN",
+        "CAPITULO",
+        "CAPÍTULO",
+        "SECCION",
+        "SECCIÓN",
+        "MODULO",
+        "MÓDULO",
+        "PARTE ",
+        "ANEXO",
+    )
+    if upper.startswith(heading_starts):
+        return True
+    letters = [c for c in clean if c.isalpha()]
+    if letters and sum(1 for c in letters if c.isupper()) / len(letters) > 0.75:
+        return True
+    return not clean.endswith((".", ":", ";", ","))
+
+def _blocks_from_text(text: str, default_type: str = "paragraph") -> List[Dict[str, Any]]:
+    text = _clean_document_text(text)
+    if not text:
+        return []
+    blocks: List[Dict[str, Any]] = []
+    chunks = [p.strip() for p in re.split(r"\n\s*\n+", text) if p.strip()]
+    if not chunks:
+        chunks = [text]
+    for chunk in chunks:
+        lines = [ln.strip() for ln in chunk.split("\n") if ln.strip()]
+        if not lines:
+            continue
+        if len(lines) > 1 and _looks_like_heading(lines[0]):
+            blocks.append({"type": "heading", "level": 1, "text": lines[0]})
+            body = "\n".join(lines[1:]).strip()
+            if body:
+                blocks.append({"type": "paragraph", "text": body})
+        elif default_type == "heading" or _looks_like_heading(chunk):
+            blocks.append({"type": "heading", "level": 1, "text": chunk})
+        else:
+            blocks.append({"type": "paragraph", "text": chunk})
+    return blocks
+
+def _normalize_document_blocks(raw: Any) -> List[Dict[str, Any]]:
+    raw = _coerce_json(raw)
+    if raw is None:
+        return []
+    if isinstance(raw, dict):
+        if "content" in raw and len(raw) == 1:
+            return _normalize_document_blocks(raw.get("content"))
+        raw = [raw]
+    if isinstance(raw, str):
+        coerced = _coerce_json(raw)
+        if coerced is not raw:
+            return _normalize_document_blocks(coerced)
+        return _blocks_from_text(raw)
+    if not isinstance(raw, list):
+        return _blocks_from_text(str(raw))
+
+    blocks: List[Dict[str, Any]] = []
+    for item in raw:
+        item = _coerce_json(item)
+        if isinstance(item, str):
+            blocks.extend(_blocks_from_text(item))
+            continue
+        if not isinstance(item, dict):
+            blocks.extend(_blocks_from_text(str(item)))
+            continue
+
+        typ = str(item.get("type") or item.get("kind") or "paragraph").lower()
+        text = _clean_document_text(item.get("text") or item.get("content") or item.get("body") or "")
+
+        if typ == "cover":
+            continue
+        if typ in {"text", "p", "paragraph", "parrafo", "parágrafo"}:
+            blocks.extend(_blocks_from_text(text, default_type="paragraph"))
+        elif typ in {"heading", "h1", "title", "titulo"}:
+            blocks.append({"type": "heading", "level": int(item.get("level") or 1), "text": text})
+        elif typ in {"h2", "subheading", "subtitle", "subtitulo"}:
+            blocks.append({"type": "heading", "level": int(item.get("level") or 2), "text": text})
+        elif typ in {"list", "ul", "ol"}:
+            entries = item.get("items") or item.get("bullets") or []
+            if isinstance(entries, str):
+                entries = [x.strip("- ").strip() for x in _clean_document_text(entries).split("\n") if x.strip()]
+            blocks.append({"type": "list", "items": entries, "ordered": bool(item.get("ordered") or typ == "ol")})
+        elif typ == "table":
+            blocks.append({"type": "table", "headers": item.get("headers") or [], "rows": item.get("rows") or []})
+        elif typ in {"image", "img"}:
+            blocks.append(dict(item, type="image"))
+        else:
+            if text:
+                blocks.extend(_blocks_from_text(text))
+            else:
+                compact = {k: v for k, v in item.items() if k != "type"}
+                blocks.extend(_blocks_from_text(json.dumps(compact, ensure_ascii=False)))
+    return [b for b in blocks if b.get("type") != "paragraph" or _clean_document_text(b.get("text"))]
+
+def _document_headings(blocks: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    out = []
+    for idx, block in enumerate(blocks, start=1):
+        if block.get("type") == "heading":
+            text = _clean_document_text(block.get("text"))
+            if text:
+                out.append({"text": text, "level": int(block.get("level") or 1), "idx": idx})
+    return out
+
+def _add_visible_docx_toc(doc, blocks: List[Dict[str, Any]]):
+    headings = _document_headings(blocks)
+    if not headings:
+        return
+    doc.add_heading("Indice de contenido", level=1)
+    for h in headings:
+        p = doc.add_paragraph(style="List Bullet" if h["level"] <= 1 else "List Bullet 2")
+        p.add_run(h["text"])
+    doc.add_page_break()
+
+def _render_docx_blocks(doc, blocks: List[Dict[str, Any]]):
+    for block in blocks:
+        typ = block.get("type")
+        if typ == "heading":
+            level = min(max(int(block.get("level") or 1), 1), 3)
+            doc.add_heading(_clean_document_text(block.get("text")), level=level)
+        elif typ == "paragraph":
+            text = _clean_document_text(block.get("text"))
+            for part in _split_long_text(text, max_len=1800) or [text]:
+                doc.add_paragraph(part, style="Normal")
+        elif typ == "list":
+            style = "List Number" if block.get("ordered") else "List Bullet"
+            for entry in block.get("items") or []:
+                doc.add_paragraph(_clean_document_text(entry), style=style)
+        elif typ == "table":
+            _render_table(doc, block)
+        elif typ == "image":
+            width_in = float(block.get("width_in", 5))
+            if block.get("image_b64"):
+                try:
+                    img = io.BytesIO(b64decode(block["image_b64"]))
+                    doc.add_picture(img, width=DocxInches(width_in))
+                except Exception:
+                    pass
+            elif block.get("url") and str(block["url"]).startswith(("http://", "https://")):
+                try:
+                    with urllib.request.urlopen(block["url"], timeout=10) as resp:
+                        tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".png")
+                        tmp.write(resp.read())
+                        tmp.flush()
+                        tmp.close()
+                        doc.add_picture(tmp.name, width=DocxInches(width_in))
+                        os.unlink(tmp.name)
+                except Exception:
+                    pass
+
+def _blocks_to_pdf_sections(blocks: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    sections: List[Dict[str, Any]] = []
+    for block in blocks:
+        typ = block.get("type")
+        if typ == "heading":
+            level = min(max(int(block.get("level") or 1), 1), 2)
+            sections.append({"type": "h1" if level == 1 else "h2", "text": _clean_document_text(block.get("text"))})
+        elif typ == "paragraph":
+            sections.append({"type": "p", "text": _clean_document_text(block.get("text"))})
+        elif typ == "list":
+            text = "\n".join(f"- {_clean_document_text(x)}" for x in block.get("items") or [])
+            sections.append({"type": "p", "text": text})
+        elif typ == "table":
+            sections.append({"type": "table", "headers": block.get("headers") or [], "rows": block.get("rows") or []})
+        elif typ == "image":
+            sections.append({"type": "img", "src": block.get("src") or block.get("url"), "caption": block.get("caption")})
+    return sections
+
+def _add_ppt_toc_slide(prs, blocks: List[Dict[str, Any]], brand: PPTBrand, company_name: Optional[str], global_bg: Optional[str]):
+    headings = _document_headings(blocks)[:12]
+    if not headings:
+        return
+    slide = prs.slides.add_slide(prs.slide_layouts[6])
+    if global_bg:
+        _set_background(slide, global_bg)
+    title_shape = slide.shapes.add_textbox(Inches(0.7), Inches(0.45), Inches(8.0), Inches(0.6))
+    title_shape.text_frame.paragraphs[0].text = "Indice de contenido"
+    _style_title(title_shape, brand)
+    body_box = slide.shapes.add_textbox(Inches(0.9), Inches(1.35), Inches(8.2), Inches(4.7))
+    body = body_box.text_frame
+    body.clear()
+    for i, h in enumerate(headings):
+        p = body.paragraphs[0] if i == 0 else body.add_paragraph()
+        p.text = h["text"]
+        p.level = 0 if h["level"] <= 1 else 1
+        p.font.name = brand.body_font or "Calibri"
+        p.font.size = Pt(18 if h["level"] <= 1 else 15)
+    _brand_slide(slide, prs, brand, company_name)
+
+def _add_ppt_content_slides(prs, blocks: List[Dict[str, Any]], brand: PPTBrand, company_name: Optional[str], global_bg: Optional[str]):
+    current_title = None
+    buffer: List[str] = []
+
+    def flush():
+        nonlocal current_title, buffer
+        if not current_title and not buffer:
+            return
+        title = current_title or "Contenido"
+        chunks = buffer or [""]
+        max_items = 7
+        for start in range(0, len(chunks), max_items):
+            slide = prs.slides.add_slide(prs.slide_layouts[6])
+            if global_bg:
+                _set_background(slide, global_bg)
+            title_shape = slide.shapes.add_textbox(Inches(0.7), Inches(0.45), Inches(8.0), Inches(0.6))
+            title_shape.text_frame.paragraphs[0].text = title if start == 0 else f"{title} (cont.)"
+            _style_title(title_shape, brand)
+            body_box = slide.shapes.add_textbox(Inches(0.8), Inches(1.35), Inches(8.5), Inches(4.8))
+            body = body_box.text_frame
+            body.clear()
+            for i, line in enumerate(chunks[start:start + max_items]):
+                p = body.paragraphs[0] if i == 0 else body.add_paragraph()
+                p.text = line[:450]
+                p.level = 0
+                p.font.name = brand.body_font or "Calibri"
+                p.font.size = Pt(16)
+            _style_body(body, brand)
+            _brand_slide(slide, prs, brand, company_name)
+        buffer = []
+
+    for block in blocks:
+        if block.get("type") == "heading":
+            flush()
+            current_title = _clean_document_text(block.get("text")) or "Contenido"
+        elif block.get("type") == "paragraph":
+            parts = _split_long_text(_clean_document_text(block.get("text")), max_len=420)
+            buffer.extend(parts or [_clean_document_text(block.get("text"))])
+        elif block.get("type") == "list":
+            buffer.extend(_clean_document_text(x) for x in block.get("items") or [])
+        elif block.get("type") == "table":
+            flush()
+            headers = block.get("headers") or []
+            rows = block.get("rows") or []
+            slide = prs.slides.add_slide(prs.slide_layouts[5])
+            if global_bg:
+                _set_background(slide, global_bg)
+            slide.shapes.title.text = current_title or "Tabla"
+            _style_title(slide.shapes.title, brand)
+            rows_n = min(len(rows), 8) + 1
+            cols_n = max(1, len(headers))
+            table = slide.shapes.add_table(rows_n, cols_n, Inches(0.7), Inches(1.5), Inches(8.6), Inches(0.8 + rows_n * 0.35)).table
+            for j, h in enumerate(headers):
+                table.cell(0, j).text = str(h)
+            for i, row in enumerate(rows[:8], start=1):
+                for j, val in enumerate(row[:cols_n]):
+                    table.cell(i, j).text = str(val)
+            _brand_slide(slide, prs, brand, company_name)
+    flush()
+
 PDF_HTML_TMPL = r"""
 <!doctype html>
 <html>
@@ -1151,7 +1420,7 @@ PDF_HTML_TMPL = r"""
     line-height: 1.2;
   }
 
-  p { font-size: 11.5pt; line-height: 1.45; margin: 8px 0 10px; }
+  p { font-size: 11.5pt; line-height: 1.45; margin: 8px 0 10px; white-space: pre-line; }
   table { width:100%; border-collapse: collapse; margin: 10px 0 14px; font-size: 11pt; }
   th, td { border:1px solid #ddd; padding: 8px; }
   th { background: {{ primary }}10; text-align: left; }
@@ -1570,11 +1839,11 @@ def generate_excel(request: Request, data: Union[ExcelRequestV2, ExcelRequest], 
     return {"url": _result_url(file_id, request)}
 
 @app.post("/generate_word")
-def generate_word(request: Request, data: WordRequest):
+def generate_word(data: WordRequest, request: Request = None):
     if data.content or data.placeholders or data.options or data.template_id:
         placeholders = data.placeholders or {}
         options = data.options or {}
-        content = data.content or []
+        content = _normalize_document_blocks(data.content or [])
 
         doc = Document()
 
@@ -1604,9 +1873,8 @@ def generate_word(request: Request, data: WordRequest):
         doc.add_page_break()
 
         # === TOC opcional ===
-        if options.get("toc", False):
-            _insert_toc(doc)
-            doc.add_page_break()
+        if options.get("toc", True):
+            _add_visible_docx_toc(doc, content)
 
         # === Encabezado/Pie + Logo/Watermark en TODAS las secciones ===
         logo_url = placeholders.get("logo_url")
@@ -1621,6 +1889,12 @@ def generate_word(request: Request, data: WordRequest):
             options.get("footer", {"center": ""}),
             logo_url=logo_url, logo_b64=logo_b64, watermark_text=wm
         )
+
+        _render_docx_blocks(doc, content)
+        file_id = f"{uuid.uuid4()}.docx"
+        file_path = os.path.join(RESULT_DIR, file_id)
+        doc.save(file_path)
+        return {"url": _result_url(file_id, request)}
 
         # Mapeo "from": "table:1", "heading:2", etc.
         sec_specs = options.get("sections", []) or []
@@ -1703,10 +1977,12 @@ def generate_word(request: Request, data: WordRequest):
         return {"url": _result_url(file_id, request)}
 
     data = sanitize(data.dict())  # aquí sí sanitizamos como antes
+    data = data.dict() if hasattr(data, "dict") else data
     doc = Document()
-    doc.add_heading(data["titulo"], 0)
-    for sec in data["secciones"]:
-        doc.add_paragraph(sec)
+    doc.add_heading(data.get("titulo") or "Documento", 0)
+    legacy_blocks = _normalize_document_blocks(data.get("secciones") or [])
+    _add_visible_docx_toc(doc, legacy_blocks)
+    _render_docx_blocks(doc, legacy_blocks)
     if data.get("tablas"):
         for tabla in data["tablas"]:
             t = doc.add_table(rows=1, cols=len(tabla[0]))
@@ -1850,6 +2126,12 @@ def generate_ppt(request: Request, data: PowerPointRequest):
 
         # Portada si existe un slide de tipo cover (en el orden del payload)
         slides_in = payload.get("slides") or []
+        document_slide_types = {"text", "paragraph", "p", "heading", "h1", "h2"}
+        doc_blocks: List[Dict[str, Any]] = []
+        if payload.get("content"):
+            doc_blocks = _normalize_document_blocks(payload.get("content"))
+        elif slides_in and any(isinstance(s, (str, dict)) and (not isinstance(s, dict) or str(s.get("type") or "").lower() in document_slide_types) for s in slides_in):
+            doc_blocks = _normalize_document_blocks(slides_in)
         for s in slides_in:
             if not isinstance(s, dict) or s.get("type") != "cover":
                 continue
@@ -1863,6 +2145,37 @@ def generate_ppt(request: Request, data: PowerPointRequest):
             if brand.primary:
                 _style_title(slide.shapes.title, brand)
             _brand_slide(slide, prs, brand, company_name)
+
+        if doc_blocks:
+            if not any(isinstance(s, dict) and s.get("type") == "cover" for s in slides_in):
+                slide = prs.slides.add_slide(prs.slide_layouts[0])
+                if global_bg: _set_background(slide, global_bg)
+                slide.shapes.title.text = payload.get("title") or payload.get("titulo") or "Presentacion"
+                if len(slide.placeholders) > 1:
+                    slide.placeholders[1].text = payload.get("subtitle", "") or ""
+                _style_title(slide.shapes.title, brand)
+                _brand_slide(slide, prs, brand, company_name)
+            if (payload.get("options") or {}).get("toc", True):
+                _add_ppt_toc_slide(prs, doc_blocks, brand, company_name, global_bg)
+            _add_ppt_content_slides(prs, doc_blocks, brand, company_name, global_bg)
+            total = len(prs.slides)
+            show_nums = (payload.get("options") or {}).get("slide_numbers", True)
+            footer_date = date.today().strftime("%Y-%m-%d")
+            for i, sl in enumerate(prs.slides):
+                _add_footer(
+                    sl,
+                    prs,
+                    i,
+                    total,
+                    brand,
+                    date_text=footer_date,
+                    company_name=company_name,
+                    show_slide_number=bool(show_nums),
+                )
+            file_id = _ppt_friendly_filename(payload, slides_in)
+            file_path = os.path.join(RESULT_DIR, file_id)
+            prs.save(file_path)
+            return {"url": _ppt_public_url(file_id, request)}
 
         # Resto de slides en orden
         for s in slides_in:
@@ -2013,6 +2326,10 @@ def generate_ppt(request: Request, data: PowerPointRequest):
         data["slides"] = slides_norm
 
     if data.get("slides"):
+        legacy_blocks = []
+        for s in data["slides"]:
+            legacy_blocks.append({"type": "heading", "level": 1, "text": s.get("title", "Slide")})
+        _add_ppt_toc_slide(prs, legacy_blocks, brand, company_name, data.get("background") or brand.secondary)
         for i, s in enumerate(data["slides"]):
             slide = prs.slides.add_slide(prs.slide_layouts[1])  # Title and Content
             if apply_branding:
